@@ -6,3 +6,9 @@
 !/runner-tray.ps1
 !/runner-tray.cmd
 !/README.md
+!/LICENSE
+!/.github/
+!/.github/workflows/
+!/.github/workflows/ci.yml
+!/tests/
+!/tests/runner-tray.Tests.ps1

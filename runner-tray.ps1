@@ -30,8 +30,25 @@ $RunCmdLiveLogFile = Join-Path $StateRoot 'run-cmd-live.log'
 $UpdateFinishedFile = Join-Path $ScriptRoot 'update.finished'
 $ReadmePath = Join-Path $ScriptRoot 'README.md'
 $AutostartRegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$AutostartValueName = 'GitHubRunnerTrayIcon'
-$PowerShellExe = Join-Path $PSHOME 'powershell.exe'
+# Prefer Windows PowerShell (guaranteed on Windows, supports -Sta); fall back
+# to pwsh when Windows PowerShell is not installed. Use the canonical install
+# path instead of $PSHOME so the preference also works when this script runs
+# under PowerShell 7 ($PSHOME would point at the pwsh directory).
+if ($env:WINDIR) {
+    $WindowsPowerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+} else {
+    $WindowsPowerShellExe = Join-Path $PSHOME 'powershell.exe'
+}
+if (Test-Path -LiteralPath $WindowsPowerShellExe) {
+    $PowerShellExe = $WindowsPowerShellExe
+} else {
+    $pwshCommand = Get-Command 'pwsh' -ErrorAction SilentlyContinue
+    if ($pwshCommand) {
+        $PowerShellExe = $pwshCommand.Source
+    } else {
+        $PowerShellExe = $WindowsPowerShellExe
+    }
+}
 $sha1 = [System.Security.Cryptography.SHA1]::Create()
 try {
     $pathHashBytes = $sha1.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($ScriptRoot.ToLowerInvariant()))
@@ -41,6 +58,11 @@ try {
 $PathHash = ([System.BitConverter]::ToString($pathHashBytes)).Replace('-', '')
 $TrayAppMutexName = "Global\GitHubRunnerTrayApp_$PathHash"
 $RunnerHostMutexName = "Global\GitHubRunnerHost_$PathHash"
+# Per-directory autostart value so multiple runner directories do not
+# overwrite each other's startup entry.
+$AutostartValueName = "GitHubRunnerTrayIcon_$PathHash"
+$LegacyAutostartValueName = 'GitHubRunnerTrayIcon'
+$script:UnresolvedRunnerProcesses = @()
 
 function Ensure-StateDirectory {
     if (-not (Test-Path -LiteralPath $StateRoot)) {
@@ -87,6 +109,29 @@ function Exit-SingleInstance {
     $Mutex.Dispose()
 }
 
+function Test-LogRollover {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [int]$MaxBytes = 5242880
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($item.Length -gt $MaxBytes) {
+            $rotatedPath = "$Path.1"
+            Remove-Item -LiteralPath $rotatedPath -Force -ErrorAction SilentlyContinue
+            Rename-Item -LiteralPath $Path -NewName (Split-Path -Leaf $rotatedPath) -ErrorAction Stop
+        }
+    } catch {
+        # Rotation is best-effort; never break logging over it.
+    }
+}
+
 function Write-HostLog {
     param(
         [Parameter(Mandatory = $true)]
@@ -94,6 +139,7 @@ function Write-HostLog {
     )
 
     Ensure-StateDirectory
+    Test-LogRollover -Path $HostLogFile
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     Add-Content -Path $HostLogFile -Value "$timestamp $Message"
 }
@@ -116,12 +162,14 @@ function Get-LastHostLogLine {
 }
 
 function Get-RunnerProcesses {
-    $all = Get-Process -Name 'Runner.Listener', 'Runner.Worker' -ErrorAction SilentlyContinue
-    if (-not $all) {
+    $all = @(Get-Process -Name 'Runner.Listener', 'Runner.Worker' -ErrorAction SilentlyContinue)
+    if ($all.Count -eq 0) {
+        $script:UnresolvedRunnerProcesses = @()
         return @()
     }
 
     $matched = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
+    $unresolved = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
     foreach ($process in $all) {
         $expectedPath = $null
         if ($process.ProcessName -eq 'Runner.Listener') {
@@ -134,15 +182,38 @@ function Get-RunnerProcesses {
             continue
         }
 
+        $exePath = $null
         try {
-            if ($process.Path -eq $expectedPath) {
-                [void]$matched.Add($process)
-            }
+            $exePath = $process.Path
         } catch {
-            # Keep filtering strict to this runner directory if the path is not readable.
+            $exePath = $null
+        }
+
+        if (-not $exePath) {
+            # Process.Path is not readable (e.g. the process runs under another
+            # account). Try CIM as a fallback; it can still return $null without
+            # elevation.
+            try {
+                $cimProcess = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $process.Id) -ErrorAction Stop
+                $exePath = $cimProcess.ExecutablePath
+            } catch {
+                $exePath = $null
+            }
+        }
+
+        if ($exePath -and ($exePath -ieq $expectedPath)) {
+            [void]$matched.Add($process)
+            continue
+        }
+
+        if (-not $exePath) {
+            # Same-named process whose directory we cannot verify; report it so
+            # the state can surface as 'Unknown' instead of a false 'Stopped'.
+            [void]$unresolved.Add($process)
         }
     }
 
+    $script:UnresolvedRunnerProcesses = $unresolved.ToArray()
     return $matched.ToArray()
 }
 
@@ -154,6 +225,10 @@ function Get-RunnerState {
 
     if ($processes | Where-Object { $_.ProcessName -eq 'Runner.Listener' }) {
         return 'Idle'
+    }
+
+    if (@($script:UnresolvedRunnerProcesses).Count -gt 0) {
+        return 'Unknown'
     }
 
     return 'Stopped'
@@ -193,6 +268,26 @@ function Get-RunnerHostPid {
         return $null
     }
 
+    # The PID file must point at our PowerShell host process, not at some
+    # unrelated process that happened to reuse the PID.
+    if ($process.ProcessName -notin @('powershell', 'pwsh')) {
+        Remove-IfExists -Path $HostPidFile
+        Write-HostLog -Message ("Stale host PID file: PID {0} belongs to {1}, not a PowerShell host process." -f $pidValue, $process.ProcessName)
+        return $null
+    }
+
+    # Best-effort command-line check; skip when it is not readable (elevation).
+    try {
+        $cimProcess = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $pidValue) -ErrorAction Stop
+        if ($cimProcess -and $cimProcess.CommandLine -and ($cimProcess.CommandLine -notmatch '-RunnerHost')) {
+            Remove-IfExists -Path $HostPidFile
+            Write-HostLog -Message ("Stale host PID file: PID {0} command line does not reference -RunnerHost." -f $pidValue)
+            return $null
+        }
+    } catch {
+        # Cannot verify the command line; accept the PID as-is.
+    }
+
     return $pidValue
 }
 
@@ -201,12 +296,29 @@ function Get-AutostartCommand {
 }
 
 function Test-AutostartEnabled {
-    try {
-        $currentValue = (Get-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -ErrorAction Stop).$AutostartValueName
-        return [string]::IsNullOrWhiteSpace($currentValue) -eq $false
-    } catch {
-        return $false
+    $expectedCommand = Get-AutostartCommand
+
+    # Check both the current per-directory value and the legacy fixed name:
+    # after an upgrade the old value may still be what Windows actually runs.
+    foreach ($valueName in @($AutostartValueName, $LegacyAutostartValueName)) {
+        try {
+            $currentValue = (Get-ItemProperty -Path $AutostartRegPath -Name $valueName -ErrorAction Stop).$valueName
+            if ([string]::IsNullOrWhiteSpace($currentValue)) {
+                continue
+            }
+
+            # Only report enabled when the stored command still points at this
+            # exact script; a stale entry (directory moved) is not actually
+            # functional even though the value exists.
+            if ($currentValue.Trim() -ieq $expectedCommand) {
+                return $true
+            }
+        } catch {
+            # Value not present; keep checking the remaining names.
+        }
     }
+
+    return $false
 }
 
 function Set-AutostartEnabled {
@@ -216,11 +328,16 @@ function Set-AutostartEnabled {
     )
 
     if ($Enabled) {
+        # Remove the legacy fixed name first so an upgrade cannot leave both
+        # values in place and double-launch the tray at startup.
+        Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
         [void](New-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -PropertyType String -Value (Get-AutostartCommand) -Force)
         return
     }
 
     Remove-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -ErrorAction SilentlyContinue
+    # Clean up the fixed name used before per-directory hashing existed.
+    Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
 }
 
 function Write-StopSignal {
@@ -252,7 +369,15 @@ function Wait-ForState {
 }
 
 function Start-RunnerControl {
+    param(
+        [int]$IdleTimeoutSeconds = 30
+    )
+
     $state = Get-RunnerState
+    if ($state -eq 'Unknown') {
+        return 'Runner state is unknown: a Runner.Listener/Runner.Worker process exists whose directory cannot be verified (it likely runs under another account). Run the tray elevated or stop that runner before starting this one.'
+    }
+
     if ($state -ne 'Stopped') {
         return "Runner is already $state."
     }
@@ -275,16 +400,31 @@ function Start-RunnerControl {
 
     [void](Start-Process -FilePath $PowerShellExe -ArgumentList $arguments -WindowStyle Hidden -WorkingDirectory $ScriptRoot)
 
-    if (Wait-ForState -ExpectedState 'Idle' -TimeoutSeconds 20) {
-        return 'Runner started.'
-    }
+    # Wait for the listener, but fail fast once the host has appeared and then
+    # disappeared (e.g. run.cmd missing) instead of waiting out the full timer.
+    $sawHostPid = $false
+    $deadline = (Get-Date).AddSeconds($IdleTimeoutSeconds)
+    do {
+        if ((Get-RunnerState) -eq 'Idle') {
+            return 'Runner started.'
+        }
+
+        $hostPid = Get-RunnerHostPid
+        if ($hostPid) {
+            $sawHostPid = $true
+        } elseif ($sawHostPid) {
+            break
+        }
+
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
 
     $lastLine = Get-LastHostLogLine
     if ($lastLine) {
         return "Runner start failed. Last host log: $lastLine"
     }
 
-    return 'Runner start failed: no idle listener was detected within 20 seconds.'
+    return "Runner start failed: no idle listener was detected within $IdleTimeoutSeconds seconds."
 }
 
 function Stop-RunnerProcesses {
@@ -303,6 +443,10 @@ function Stop-RunnerProcesses {
 }
 
 function Stop-RunnerControl {
+    if ((Get-RunnerState) -eq 'Unknown') {
+        return 'Runner state is unknown: a same-named runner process exists whose directory cannot be verified. Stop aborted to avoid killing a runner outside this directory.'
+    }
+
     Write-StopSignal
 
     $hostPid = Get-RunnerHostPid
@@ -356,23 +500,33 @@ function Invoke-RunnerHost {
                 break
             }
 
+            Test-LogRollover -Path $RunCmdLiveLogFile
             Add-Content -Path $RunCmdLiveLogFile -Value ("[{0}] Starting run.cmd" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
-            $runCmdProcess = Start-Process -FilePath $RunCmdPath -WindowStyle Hidden -WorkingDirectory $ScriptRoot -RedirectStandardOutput $RunCmdLiveLogFile -PassThru
+            # Launch via cmd.exe so run.cmd output is APPENDED to the live log
+            # (Start-Process -RedirectStandardOutput truncates the file) and so
+            # stderr is merged into the same live log (2>&1).
+            $redirectCommand = '""{0}" >> "{1}" 2>&1"' -f $RunCmdPath, $RunCmdLiveLogFile
+            $runCmdProcess = Start-Process -FilePath $env:ComSpec -ArgumentList '/c', $redirectCommand -WindowStyle Hidden -WorkingDirectory $ScriptRoot -PassThru
             Write-HostLog -Message ("run.cmd started with PID {0}." -f $runCmdProcess.Id)
 
             while (-not $runCmdProcess.HasExited) {
                 if (Test-Path -LiteralPath $StopFlagFile) {
                     Write-HostLog -Message ("Stop signal detected; terminating run.cmd PID {0}." -f $runCmdProcess.Id)
                     Stop-RunnerProcesses
-                    Stop-Process -Id $runCmdProcess.Id -Force
-                    $runCmdProcess.WaitForExit()
+                    Stop-Process -Id $runCmdProcess.Id -Force -ErrorAction SilentlyContinue
+                    if (-not $runCmdProcess.WaitForExit(15000)) {
+                        # Never block forever: retry once, then give up on the wait.
+                        Write-HostLog -Message ("run.cmd PID {0} still alive after 15 s; forcing termination again." -f $runCmdProcess.Id)
+                        Stop-Process -Id $runCmdProcess.Id -Force -ErrorAction SilentlyContinue
+                        [void]$runCmdProcess.WaitForExit(10000)
+                    }
                     break
                 }
 
                 Start-Sleep -Seconds 1
             }
 
-            $exitCode = $runCmdProcess.ExitCode
+            $exitCode = if ($runCmdProcess.HasExited) { $runCmdProcess.ExitCode } else { -1 }
             Write-HostLog -Message ("run.cmd exited with code {0}." -f $exitCode)
             Add-Content -Path $RunCmdLiveLogFile -Value ("[{0}] run.cmd exited with code {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $exitCode)
 
@@ -432,6 +586,10 @@ function Get-LatestRunnerDiagLogPath {
 }
 
 function Get-RunCmdLiveLogPath {
+    if (-not (Test-Path -LiteralPath $RunCmdLiveLogFile)) {
+        return $null
+    }
+
     return $RunCmdLiveLogFile
 }
 
@@ -584,6 +742,23 @@ function Show-LogViewerWindow {
     [void]$form.ShowDialog()
 }
 
+function Show-TrayError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    try {
+        Write-HostLog -Message ("Tray error: {0}" -f $ErrorRecord.Exception.ToString())
+    } catch {
+    }
+
+    try {
+        [System.Windows.Forms.MessageBox]::Show("An error occurred:`r`n$($ErrorRecord.Exception.Message)", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    } catch {
+    }
+}
+
 function Ensure-StaForTray {
     if ([System.Threading.Thread]::CurrentThread.ApartmentState -eq [System.Threading.ApartmentState]::STA) {
         return $true
@@ -612,14 +787,23 @@ public static class TrayNativeMethods
 {
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern bool DestroyIcon(IntPtr handle);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
 }
 '@
+
+    # Keep the tray icon and forms crisp on high-DPI displays.
+    try {
+        [void][TrayNativeMethods]::SetProcessDPIAware()
+    } catch {
+    }
 }
 
 function New-StatusIcon {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Stopped', 'Idle', 'Busy')]
+        [ValidateSet('Stopped', 'Idle', 'Busy', 'Unknown')]
         [string]$State
     )
 
@@ -648,6 +832,9 @@ function New-StatusIcon {
             }
             'Busy' {
                 $markerColor = [System.Drawing.Color]::FromArgb(255, 153, 0)
+            }
+            'Unknown' {
+                $markerColor = [System.Drawing.Color]::FromArgb(120, 120, 120)
             }
             default {
                 $markerColor = [System.Drawing.Color]::FromArgb(201, 48, 44)
@@ -698,15 +885,40 @@ function Start-TrayApplication {
         [System.Windows.Forms.Application]::EnableVisualStyles()
         [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
+        # Global exception safety nets so a UI-thread failure is logged (and
+        # visible) instead of silently killing the tray.
+        $script:TrayThreadExceptionHandler = [System.Threading.ThreadExceptionEventHandler]{
+            param($sender, $args)
+            try {
+                Write-HostLog -Message ("Tray thread exception: {0}" -f $args.Exception.ToString())
+            } catch {
+            }
+        }
+        [System.Windows.Forms.Application]::Add_ThreadException($script:TrayThreadExceptionHandler)
+
+        $script:TrayUnhandledExceptionHandler = [System.UnhandledExceptionEventHandler]{
+            param($sender, $args)
+            try {
+                Write-HostLog -Message ("Tray unhandled exception: {0}" -f $args.ExceptionObject.ToString())
+            } catch {
+            }
+        }
+        [System.AppDomain]::CurrentDomain.Add_UnhandledException($script:TrayUnhandledExceptionHandler)
+
         $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
         $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
         $statusItem = $contextMenu.Items.Add('Status: Loading...')
         $statusItem.Enabled = $false
+        $dirItem = $contextMenu.Items.Add("Runner directory: $ScriptRoot")
+        $dirItem.Enabled = $false
         [void]$contextMenu.Items.Add('-')
         $startItem = $contextMenu.Items.Add('Start runner')
         $stopItem = $contextMenu.Items.Add('Stop runner')
         $autostartItem = $contextMenu.Items.Add('Run on Windows startup')
         $autostartItem.CheckOnClick = $true
+        $notifyItem = $contextMenu.Items.Add('Show state notifications')
+        $notifyItem.CheckOnClick = $true
+        $notifyItem.Checked = $true
         [void]$contextMenu.Items.Add('-')
         $openLatestRunnerLogItem = $contextMenu.Items.Add('Open latest runner log')
         $viewLatestRunnerLogItem = $contextMenu.Items.Add('Live view latest runner log')
@@ -719,22 +931,38 @@ function Start-TrayApplication {
         [void]$contextMenu.Items.Add('-')
         $exitItem = $contextMenu.Items.Add('Exit tray icon')
 
-        $script:CurrentIcon = $null
+        $script:IconCache = @{}
+        $script:LastState = $null
 
         $refreshUi = {
-            $state = Get-RunnerState
-            $statusItem.Text = "Status: $state"
-            $startItem.Enabled = $state -eq 'Stopped'
-            $stopItem.Enabled = $state -ne 'Stopped'
-            $autostartItem.Checked = Test-AutostartEnabled
-            $notifyIcon.Text = "GitHub Runner: $state"
+            try {
+                $state = Get-RunnerState
+                if ($state -eq 'Unknown') {
+                    $statusItem.Text = 'Status: Unknown (elevation required)'
+                    $startItem.Enabled = $false
+                    $stopItem.Enabled = $false
+                } else {
+                    $statusItem.Text = "Status: $state"
+                    $startItem.Enabled = $state -eq 'Stopped'
+                    $stopItem.Enabled = $state -in @('Idle', 'Busy')
+                }
+                $autostartItem.Checked = Test-AutostartEnabled
+                $notifyIcon.Text = "GitHub Runner: $state"
 
-            if ($script:CurrentIcon) {
-                $script:CurrentIcon.Dispose()
+                if ($state -ne $script:LastState) {
+                    if ($notifyItem.Checked -and ($null -ne $script:LastState)) {
+                        $notifyIcon.ShowBalloonTip(3000, 'GitHub Runner', "Status changed: $script:LastState -> $state", [System.Windows.Forms.ToolTipIcon]::Info)
+                    }
+                    $script:LastState = $state
+                }
+
+                if (-not $script:IconCache.ContainsKey($state)) {
+                    $script:IconCache[$state] = New-StatusIcon -State $state
+                }
+                $notifyIcon.Icon = $script:IconCache[$state]
+            } catch {
+                Show-TrayError -ErrorRecord $_
             }
-
-            $script:CurrentIcon = New-StatusIcon -State $state
-            $notifyIcon.Icon = $script:CurrentIcon
         }
 
         $notifyIcon.ContextMenuStrip = $contextMenu
@@ -745,90 +973,145 @@ function Start-TrayApplication {
         $timer.Add_Tick($refreshUi)
 
         $startItem.Add_Click({
-            $message = Start-RunnerControl
-            [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-            & $refreshUi
+            try {
+                $message = Start-RunnerControl
+                [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                & $refreshUi
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $stopItem.Add_Click({
-            $message = Stop-RunnerControl
-            [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-            & $refreshUi
+            try {
+                $confirm = [System.Windows.Forms.MessageBox]::Show('Stop the GitHub Actions runner? Any job currently running will be interrupted.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) {
+                    return
+                }
+
+                $message = Stop-RunnerControl
+                [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                & $refreshUi
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $autostartItem.Add_Click({
-            Set-AutostartEnabled -Enabled $autostartItem.Checked
-            & $refreshUi
+            try {
+                Set-AutostartEnabled -Enabled $autostartItem.Checked
+                & $refreshUi
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openLatestRunnerLogItem.Add_Click({
-            $path = Get-LatestRunnerDiagLogPath
-            if ($path) {
-                Open-LogFile -Path $path
-                return
-            }
+            try {
+                $path = Get-LatestRunnerDiagLogPath
+                if ($path) {
+                    Open-LogFile -Path $path
+                    return
+                }
 
-            [System.Windows.Forms.MessageBox]::Show("No runner log file found in:`r`n$DiagRoot", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("No runner log file found in:`r`n$DiagRoot", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $viewLatestRunnerLogItem.Add_Click({
-            Show-LogViewerWindow -PathResolver { Get-LatestRunnerDiagLogPath } -Title 'GitHub Runner - Live Log'
+            try {
+                Show-LogViewerWindow -PathResolver { Get-LatestRunnerDiagLogPath } -Title 'GitHub Runner - Live Log'
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $viewRunCmdLiveLogItem.Add_Click({
-            Ensure-StateDirectory
-            Show-LogViewerWindow -PathResolver { Get-RunCmdLiveLogPath } -Title 'GitHub Runner - run.cmd Live Output'
+            try {
+                Ensure-StateDirectory
+                Show-LogViewerWindow -PathResolver { Get-RunCmdLiveLogPath } -Title 'GitHub Runner - run.cmd Live Output'
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openRunCmdLiveLogItem.Add_Click({
-            Ensure-StateDirectory
-            if (Test-Path -LiteralPath $RunCmdLiveLogFile) {
-                Open-LogFile -Path $RunCmdLiveLogFile
-                return
-            }
+            try {
+                Ensure-StateDirectory
+                if (Test-Path -LiteralPath $RunCmdLiveLogFile) {
+                    Open-LogFile -Path $RunCmdLiveLogFile
+                    return
+                }
 
-            [System.Windows.Forms.MessageBox]::Show("run.cmd output log is not available yet:`r`n$RunCmdLiveLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("run.cmd output log is not available yet:`r`n$RunCmdLiveLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openHostLogItem.Add_Click({
-            Ensure-StateDirectory
-            if (Test-Path -LiteralPath $HostLogFile) {
-                Open-LogFile -Path $HostLogFile
-                return
-            }
+            try {
+                Ensure-StateDirectory
+                if (Test-Path -LiteralPath $HostLogFile) {
+                    Open-LogFile -Path $HostLogFile
+                    return
+                }
 
-            [System.Windows.Forms.MessageBox]::Show("Tray host log is not available yet:`r`n$HostLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Tray host log is not available yet:`r`n$HostLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openDocItem.Add_Click({
-            if (Test-Path -LiteralPath $ReadmePath) {
-                [void](Start-Process -FilePath $ReadmePath)
-            } else {
-                [System.Windows.Forms.MessageBox]::Show('README.md was not found.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            try {
+                if (Test-Path -LiteralPath $ReadmePath) {
+                    [void](Start-Process -FilePath $ReadmePath)
+                } else {
+                    [System.Windows.Forms.MessageBox]::Show('README.md was not found.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                }
+            } catch {
+                Show-TrayError -ErrorRecord $_
             }
         })
 
         $openFolderItem.Add_Click({
-            [void](Start-Process -FilePath $ScriptRoot)
+            try {
+                [void](Start-Process -FilePath $ScriptRoot)
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $exitItem.Add_Click({
-            $timer.Stop()
-            $notifyIcon.Visible = $false
-            [System.Windows.Forms.Application]::Exit()
+            try {
+                $timer.Stop()
+                $notifyIcon.Visible = $false
+                [System.Windows.Forms.Application]::Exit()
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $notifyIcon.Add_DoubleClick({
-            $message = "GitHub Runner is currently $(Get-RunnerState)."
-            [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            try {
+                Ensure-StateDirectory
+                Show-LogViewerWindow -PathResolver { Get-RunCmdLiveLogPath } -Title 'GitHub Runner - run.cmd Live Output'
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         & $refreshUi
         $timer.Start()
         [System.Windows.Forms.Application]::Run()
 
-        if ($script:CurrentIcon) {
-            $script:CurrentIcon.Dispose()
+        if ($script:IconCache) {
+            foreach ($cacheIcon in $script:IconCache.Values) {
+                $cacheIcon.Dispose()
+            }
         }
 
         $timer.Dispose()
@@ -839,56 +1122,89 @@ function Start-TrayApplication {
     }
 }
 
-if ($RunnerHost) {
-    Invoke-RunnerHost
-    exit 0
-}
-
-if ($Status) {
-    Write-Output (Get-RunnerState)
-    exit 0
-}
-
-if ($StartRunner) {
-    Write-Output (Start-RunnerControl)
-    exit 0
-}
-
-if ($StopRunner) {
-    Write-Output (Stop-RunnerControl)
-    exit 0
-}
-
-if ($LogPath) {
-    $latestLogPath = Get-LatestRunnerDiagLogPath
-    if ($latestLogPath) {
-        Write-Output $latestLogPath
-    }
-    exit 0
-}
-
-if ($SelfTest) {
-    Initialize-UiAssemblies
-    Ensure-StateDirectory
-    $icons = @(
-        (New-StatusIcon -State 'Stopped'),
-        (New-StatusIcon -State 'Idle'),
-        (New-StatusIcon -State 'Busy')
-    )
-    foreach ($icon in $icons) {
-        $icon.Dispose()
+try {
+    if ($RunnerHost) {
+        Invoke-RunnerHost
+        exit 0
     }
 
-    [pscustomobject]@{
-        ScriptPath = $ScriptPath
-        RunnerState = Get-RunnerState
-        AutostartEnabled = Test-AutostartEnabled
-        AutostartCommand = Get-AutostartCommand
-        LatestRunnerLogPath = Get-LatestRunnerDiagLogPath
-        RunCmdLiveLogPath = Get-RunCmdLiveLogPath
-        StateRoot = $StateRoot
-    } | Format-List | Out-String | Write-Output
-    exit 0
-}
+    if ($Status) {
+        Write-Output (Get-RunnerState)
+        exit 0
+    }
 
-Start-TrayApplication
+    if ($StartRunner) {
+        Write-Output (Start-RunnerControl)
+        exit 0
+    }
+
+    if ($StopRunner) {
+        Write-Output (Stop-RunnerControl)
+        exit 0
+    }
+
+    if ($LogPath) {
+        $latestLogPath = Get-LatestRunnerDiagLogPath
+        if ($latestLogPath) {
+            Write-Output $latestLogPath
+        }
+        exit 0
+    }
+
+    if ($SelfTest) {
+        Initialize-UiAssemblies
+        Ensure-StateDirectory
+        $icons = @(
+            (New-StatusIcon -State 'Stopped'),
+            (New-StatusIcon -State 'Idle'),
+            (New-StatusIcon -State 'Busy'),
+            (New-StatusIcon -State 'Unknown')
+        )
+        foreach ($icon in $icons) {
+            $icon.Dispose()
+        }
+
+        # Probe whether the state directory is writable.
+        $stateDirWritable = $false
+        try {
+            $probeFile = Join-Path $StateRoot '.selftest-probe'
+            Set-Content -LiteralPath $probeFile -Value 'probe'
+            Remove-IfExists -Path $probeFile
+            $stateDirWritable = $true
+        } catch {
+        }
+
+        [pscustomobject]@{
+            ScriptPath = $ScriptPath
+            RunCmdExists = Test-Path -LiteralPath $RunCmdPath
+            BinDirExists = Test-Path -LiteralPath $BinRoot
+            RunnerState = Get-RunnerState
+            AutostartEnabled = Test-AutostartEnabled
+            AutostartCommand = Get-AutostartCommand
+            AutostartRegValueName = $AutostartValueName
+            StateDirWritable = $stateDirWritable
+            LatestRunnerLogPath = Get-LatestRunnerDiagLogPath
+            RunCmdLiveLogPath = Get-RunCmdLiveLogPath
+            StateRoot = $StateRoot
+        } | Format-List | Out-String | Write-Output
+        exit 0
+    }
+
+    Start-TrayApplication
+} catch {
+    # Early boot failures are invisible when launched from a hidden window.
+    # Log them to a temp file and try to surface a message box.
+    $bootLog = Join-Path $env:TEMP 'github-runner-trayicon-boot.log'
+    try {
+        Add-Content -LiteralPath $bootLog -Value ("[{0}] {1}" -f (Get-Date -Format o), $_.Exception.ToString())
+    } catch {
+    }
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        [System.Windows.Forms.MessageBox]::Show("runner-tray.ps1 failed to start:`r`n$($_.Exception.Message)`r`n`r`nDetails were written to:`r`n$bootLog", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    } catch {
+    }
+
+    exit 1
+}
