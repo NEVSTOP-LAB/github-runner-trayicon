@@ -302,6 +302,10 @@ function Wait-ForState {
 }
 
 function Start-RunnerControl {
+    param(
+        [int]$IdleTimeoutSeconds = 30
+    )
+
     $state = Get-RunnerState
     if ($state -eq 'Unknown') {
         return 'Runner state is unknown: a Runner.Listener/Runner.Worker process exists whose directory cannot be verified (it likely runs under another account). Run the tray elevated or stop that runner before starting this one.'
@@ -329,16 +333,31 @@ function Start-RunnerControl {
 
     [void](Start-Process -FilePath $PowerShellExe -ArgumentList $arguments -WindowStyle Hidden -WorkingDirectory $ScriptRoot)
 
-    if (Wait-ForState -ExpectedState 'Idle' -TimeoutSeconds 20) {
-        return 'Runner started.'
-    }
+    # Wait for the listener, but fail fast once the host has appeared and then
+    # disappeared (e.g. run.cmd missing) instead of waiting out the full timer.
+    $sawHostPid = $false
+    $deadline = (Get-Date).AddSeconds($IdleTimeoutSeconds)
+    do {
+        if ((Get-RunnerState) -eq 'Idle') {
+            return 'Runner started.'
+        }
+
+        $hostPid = Get-RunnerHostPid
+        if ($hostPid) {
+            $sawHostPid = $true
+        } elseif ($sawHostPid) {
+            break
+        }
+
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
 
     $lastLine = Get-LastHostLogLine
     if ($lastLine) {
         return "Runner start failed. Last host log: $lastLine"
     }
 
-    return 'Runner start failed: no idle listener was detected within 20 seconds.'
+    return "Runner start failed: no idle listener was detected within $IdleTimeoutSeconds seconds."
 }
 
 function Stop-RunnerProcesses {
