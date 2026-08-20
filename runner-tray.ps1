@@ -876,6 +876,9 @@ function Start-TrayApplication {
         $stopItem = $contextMenu.Items.Add('Stop runner')
         $autostartItem = $contextMenu.Items.Add('Run on Windows startup')
         $autostartItem.CheckOnClick = $true
+        $notifyItem = $contextMenu.Items.Add('Show state notifications')
+        $notifyItem.CheckOnClick = $true
+        $notifyItem.Checked = $true
         [void]$contextMenu.Items.Add('-')
         $openLatestRunnerLogItem = $contextMenu.Items.Add('Open latest runner log')
         $viewLatestRunnerLogItem = $contextMenu.Items.Add('Live view latest runner log')
@@ -889,6 +892,7 @@ function Start-TrayApplication {
         $exitItem = $contextMenu.Items.Add('Exit tray icon')
 
         $script:IconCache = @{}
+        $script:LastState = $null
 
         $refreshUi = {
             try {
@@ -904,6 +908,13 @@ function Start-TrayApplication {
                 }
                 $autostartItem.Checked = Test-AutostartEnabled
                 $notifyIcon.Text = "GitHub Runner: $state"
+
+                if ($state -ne $script:LastState) {
+                    if ($notifyItem.Checked -and ($null -ne $script:LastState)) {
+                        $notifyIcon.ShowBalloonTip(3000, 'GitHub Runner', "Status changed: $script:LastState -> $state", [System.Windows.Forms.ToolTipIcon]::Info)
+                    }
+                    $script:LastState = $state
+                }
 
                 if (-not $script:IconCache.ContainsKey($state)) {
                     $script:IconCache[$state] = New-StatusIcon -State $state
