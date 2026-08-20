@@ -30,7 +30,6 @@ $RunCmdLiveLogFile = Join-Path $StateRoot 'run-cmd-live.log'
 $UpdateFinishedFile = Join-Path $ScriptRoot 'update.finished'
 $ReadmePath = Join-Path $ScriptRoot 'README.md'
 $AutostartRegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$AutostartValueName = 'GitHubRunnerTrayIcon'
 $PowerShellExe = Join-Path $PSHOME 'powershell.exe'
 $sha1 = [System.Security.Cryptography.SHA1]::Create()
 try {
@@ -41,6 +40,10 @@ try {
 $PathHash = ([System.BitConverter]::ToString($pathHashBytes)).Replace('-', '')
 $TrayAppMutexName = "Global\GitHubRunnerTrayApp_$PathHash"
 $RunnerHostMutexName = "Global\GitHubRunnerHost_$PathHash"
+# Per-directory autostart value so multiple runner directories do not
+# overwrite each other's startup entry.
+$AutostartValueName = "GitHubRunnerTrayIcon_$PathHash"
+$LegacyAutostartValueName = 'GitHubRunnerTrayIcon'
 $script:UnresolvedRunnerProcesses = @()
 
 function Ensure-StateDirectory {
@@ -271,6 +274,8 @@ function Set-AutostartEnabled {
     }
 
     Remove-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -ErrorAction SilentlyContinue
+    # Clean up the fixed name used before per-directory hashing existed.
+    Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
 }
 
 function Write-StopSignal {
