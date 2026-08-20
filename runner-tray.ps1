@@ -406,15 +406,20 @@ function Invoke-RunnerHost {
                 if (Test-Path -LiteralPath $StopFlagFile) {
                     Write-HostLog -Message ("Stop signal detected; terminating run.cmd PID {0}." -f $runCmdProcess.Id)
                     Stop-RunnerProcesses
-                    Stop-Process -Id $runCmdProcess.Id -Force
-                    $runCmdProcess.WaitForExit()
+                    Stop-Process -Id $runCmdProcess.Id -Force -ErrorAction SilentlyContinue
+                    if (-not $runCmdProcess.WaitForExit(15000)) {
+                        # Never block forever: retry once, then give up on the wait.
+                        Write-HostLog -Message ("run.cmd PID {0} still alive after 15 s; forcing termination again." -f $runCmdProcess.Id)
+                        Stop-Process -Id $runCmdProcess.Id -Force -ErrorAction SilentlyContinue
+                        [void]$runCmdProcess.WaitForExit(10000)
+                    }
                     break
                 }
 
                 Start-Sleep -Seconds 1
             }
 
-            $exitCode = $runCmdProcess.ExitCode
+            $exitCode = if ($runCmdProcess.HasExited) { $runCmdProcess.ExitCode } else { -1 }
             Write-HostLog -Message ("run.cmd exited with code {0}." -f $exitCode)
             Add-Content -Path $RunCmdLiveLogFile -Value ("[{0}] run.cmd exited with code {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $exitCode)
 
