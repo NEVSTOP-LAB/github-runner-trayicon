@@ -953,6 +953,11 @@ function Start-TrayApplication {
 
         $stopItem.Add_Click({
             try {
+                $confirm = [System.Windows.Forms.MessageBox]::Show('Stop the GitHub Actions runner? Any job currently running will be interrupted.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) {
+                    return
+                }
+
                 $message = Stop-RunnerControl
                 [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
                 & $refreshUi
