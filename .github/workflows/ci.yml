@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  analyze:
+    name: Static analysis (PSScriptAnalyzer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
+      - name: Run PSScriptAnalyzer (Error severity)
+        shell: pwsh
+        run: |
+          $issues = @()
+          Get-ChildItem -Path . -Filter *.ps1 -File | ForEach-Object {
+            $issues += @(Invoke-ScriptAnalyzer -Path $_.FullName -Severity Error)
+          }
+          if ($issues.Count -gt 0) {
+            $issues | Format-Table -AutoSize
+            throw "PSScriptAnalyzer found $($issues.Count) Error-severity issue(s)."
+          }
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path '.\runner-tray.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors) {
+            $errors | Format-List
+            throw 'Syntax errors in runner-tray.ps1.'
+          }
+
+  test:
+    name: Pester (${{ matrix.pshost }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pshost: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Pester 5
+        shell: pwsh
+        run: Install-Module -Name Pester -RequiredVersion 5.5.0 -Force -Scope CurrentUser -SkipPublisherCheck
+      - name: Run Pester (Windows PowerShell 5.1)
+        if: matrix.pshost == 'powershell'
+        shell: powershell
+        run: Invoke-Pester -Path ./tests -Output Detailed
+      - name: Run Pester (PowerShell 7)
+        if: matrix.pshost == 'pwsh'
+        shell: pwsh
+        run: Invoke-Pester -Path ./tests -Output Detailed
