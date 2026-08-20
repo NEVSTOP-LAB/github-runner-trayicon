@@ -96,6 +96,70 @@ Describe 'Autostart registry' {
             Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+
+    It 'reports enabled when a matching legacy value exists' {
+        $dir = Get-Location
+        while ($null -ne $dir -and -not (Test-Path -LiteralPath (Join-Path $dir 'runner-tray.ps1'))) {
+            $dir = Split-Path -Parent $dir
+        }
+        if ($null -eq $dir) { throw 'runner-tray.ps1 not found above the current directory.' }
+        $scriptPath = Join-Path $dir 'runner-tray.ps1'
+        $content = Get-Content -LiteralPath $scriptPath -Raw
+        $content = $content -replace '(?ms)^\[CmdletBinding\(\)\]\s*param\([^)]*\)\s*', ''
+        $cut = $content.IndexOf('if ($RunnerHost) {')
+        if ($cut -lt 0) { throw 'dispatch marker not found in runner-tray.ps1' }
+        $content = $content.Substring(0, $cut).TrimEnd()
+        if ($content.EndsWith('try {')) { $content = $content.Substring(0, $content.Length - 5).TrimEnd() }
+        $escapedPath = $scriptPath.Replace("'", "''")
+        $content = $content.Replace('$ScriptPath = $PSCommandPath', "`$ScriptPath = '$escapedPath'")
+        Invoke-Expression $content
+
+        $testKey = Join-Path 'HKCU:\Software' 'NEVSTOP-LAB-PesterTest'
+        $AutostartRegPath = $testKey
+        try {
+            Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -Path $testKey -Force | Out-Null
+            New-ItemProperty -Path $testKey -Name $LegacyAutostartValueName -PropertyType String -Value (Get-AutostartCommand) -Force | Out-Null
+
+            Test-AutostartEnabled | Should -BeTrue
+        } finally {
+            Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'removes the legacy value when enabling autostart' {
+        $dir = Get-Location
+        while ($null -ne $dir -and -not (Test-Path -LiteralPath (Join-Path $dir 'runner-tray.ps1'))) {
+            $dir = Split-Path -Parent $dir
+        }
+        if ($null -eq $dir) { throw 'runner-tray.ps1 not found above the current directory.' }
+        $scriptPath = Join-Path $dir 'runner-tray.ps1'
+        $content = Get-Content -LiteralPath $scriptPath -Raw
+        $content = $content -replace '(?ms)^\[CmdletBinding\(\)\]\s*param\([^)]*\)\s*', ''
+        $cut = $content.IndexOf('if ($RunnerHost) {')
+        if ($cut -lt 0) { throw 'dispatch marker not found in runner-tray.ps1' }
+        $content = $content.Substring(0, $cut).TrimEnd()
+        if ($content.EndsWith('try {')) { $content = $content.Substring(0, $content.Length - 5).TrimEnd() }
+        $escapedPath = $scriptPath.Replace("'", "''")
+        $content = $content.Replace('$ScriptPath = $PSCommandPath', "`$ScriptPath = '$escapedPath'")
+        Invoke-Expression $content
+
+        $testKey = Join-Path 'HKCU:\Software' 'NEVSTOP-LAB-PesterTest'
+        $AutostartRegPath = $testKey
+        try {
+            Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -Path $testKey -Force | Out-Null
+            New-ItemProperty -Path $testKey -Name $LegacyAutostartValueName -PropertyType String -Value (Get-AutostartCommand) -Force | Out-Null
+
+            Set-AutostartEnabled -Enabled $true
+            $legacy = Get-ItemProperty -Path $testKey -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
+            $current = Get-ItemProperty -Path $testKey -Name $AutostartValueName -ErrorAction SilentlyContinue
+            $null -eq $legacy | Should -BeTrue
+            $null -ne $current | Should -BeTrue
+        } finally {
+            Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'Runner state detection' {

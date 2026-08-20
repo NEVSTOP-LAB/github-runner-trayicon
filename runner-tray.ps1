@@ -296,19 +296,29 @@ function Get-AutostartCommand {
 }
 
 function Test-AutostartEnabled {
-    try {
-        $currentValue = (Get-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -ErrorAction Stop).$AutostartValueName
-        if ([string]::IsNullOrWhiteSpace($currentValue)) {
-            return $false
-        }
+    $expectedCommand = Get-AutostartCommand
 
-        # Only report enabled when the stored command still points at this
-        # exact script; a stale entry (directory moved, old value name) is not
-        # actually functional even though the value exists.
-        return ($currentValue.Trim() -ieq (Get-AutostartCommand))
-    } catch {
-        return $false
+    # Check both the current per-directory value and the legacy fixed name:
+    # after an upgrade the old value may still be what Windows actually runs.
+    foreach ($valueName in @($AutostartValueName, $LegacyAutostartValueName)) {
+        try {
+            $currentValue = (Get-ItemProperty -Path $AutostartRegPath -Name $valueName -ErrorAction Stop).$valueName
+            if ([string]::IsNullOrWhiteSpace($currentValue)) {
+                continue
+            }
+
+            # Only report enabled when the stored command still points at this
+            # exact script; a stale entry (directory moved) is not actually
+            # functional even though the value exists.
+            if ($currentValue.Trim() -ieq $expectedCommand) {
+                return $true
+            }
+        } catch {
+            # Value not present; keep checking the remaining names.
+        }
     }
+
+    return $false
 }
 
 function Set-AutostartEnabled {
@@ -318,6 +328,9 @@ function Set-AutostartEnabled {
     )
 
     if ($Enabled) {
+        # Remove the legacy fixed name first so an upgrade cannot leave both
+        # values in place and double-launch the tray at startup.
+        Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
         [void](New-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -PropertyType String -Value (Get-AutostartCommand) -Force)
         return
     }
