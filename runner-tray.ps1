@@ -1034,56 +1034,74 @@ function Start-TrayApplication {
     }
 }
 
-if ($RunnerHost) {
-    Invoke-RunnerHost
-    exit 0
-}
-
-if ($Status) {
-    Write-Output (Get-RunnerState)
-    exit 0
-}
-
-if ($StartRunner) {
-    Write-Output (Start-RunnerControl)
-    exit 0
-}
-
-if ($StopRunner) {
-    Write-Output (Stop-RunnerControl)
-    exit 0
-}
-
-if ($LogPath) {
-    $latestLogPath = Get-LatestRunnerDiagLogPath
-    if ($latestLogPath) {
-        Write-Output $latestLogPath
-    }
-    exit 0
-}
-
-if ($SelfTest) {
-    Initialize-UiAssemblies
-    Ensure-StateDirectory
-    $icons = @(
-        (New-StatusIcon -State 'Stopped'),
-        (New-StatusIcon -State 'Idle'),
-        (New-StatusIcon -State 'Busy')
-    )
-    foreach ($icon in $icons) {
-        $icon.Dispose()
+try {
+    if ($RunnerHost) {
+        Invoke-RunnerHost
+        exit 0
     }
 
-    [pscustomobject]@{
-        ScriptPath = $ScriptPath
-        RunnerState = Get-RunnerState
-        AutostartEnabled = Test-AutostartEnabled
-        AutostartCommand = Get-AutostartCommand
-        LatestRunnerLogPath = Get-LatestRunnerDiagLogPath
-        RunCmdLiveLogPath = Get-RunCmdLiveLogPath
-        StateRoot = $StateRoot
-    } | Format-List | Out-String | Write-Output
-    exit 0
-}
+    if ($Status) {
+        Write-Output (Get-RunnerState)
+        exit 0
+    }
 
-Start-TrayApplication
+    if ($StartRunner) {
+        Write-Output (Start-RunnerControl)
+        exit 0
+    }
+
+    if ($StopRunner) {
+        Write-Output (Stop-RunnerControl)
+        exit 0
+    }
+
+    if ($LogPath) {
+        $latestLogPath = Get-LatestRunnerDiagLogPath
+        if ($latestLogPath) {
+            Write-Output $latestLogPath
+        }
+        exit 0
+    }
+
+    if ($SelfTest) {
+        Initialize-UiAssemblies
+        Ensure-StateDirectory
+        $icons = @(
+            (New-StatusIcon -State 'Stopped'),
+            (New-StatusIcon -State 'Idle'),
+            (New-StatusIcon -State 'Busy')
+        )
+        foreach ($icon in $icons) {
+            $icon.Dispose()
+        }
+
+        [pscustomobject]@{
+            ScriptPath = $ScriptPath
+            RunnerState = Get-RunnerState
+            AutostartEnabled = Test-AutostartEnabled
+            AutostartCommand = Get-AutostartCommand
+            LatestRunnerLogPath = Get-LatestRunnerDiagLogPath
+            RunCmdLiveLogPath = Get-RunCmdLiveLogPath
+            StateRoot = $StateRoot
+        } | Format-List | Out-String | Write-Output
+        exit 0
+    }
+
+    Start-TrayApplication
+} catch {
+    # Early boot failures are invisible when launched from a hidden window.
+    # Log them to a temp file and try to surface a message box.
+    $bootLog = Join-Path $env:TEMP 'github-runner-trayicon-boot.log'
+    try {
+        Add-Content -LiteralPath $bootLog -Value ("[{0}] {1}" -f (Get-Date -Format o), $_.Exception.ToString())
+    } catch {
+    }
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        [System.Windows.Forms.MessageBox]::Show("runner-tray.ps1 failed to start:`r`n$($_.Exception.Message)`r`n`r`nDetails were written to:`r`n$bootLog", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    } catch {
+    }
+
+    exit 1
+}
