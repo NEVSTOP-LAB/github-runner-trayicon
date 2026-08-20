@@ -12,4 +12,3 @@
 !/.github/workflows/ci.yml
 !/tests/
 !/tests/runner-tray.Tests.ps1
-!/install.ps1

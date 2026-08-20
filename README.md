@@ -6,19 +6,12 @@
 
 - `runner-tray.ps1`：主程序（托盘、启动停止、日志窗口、单实例）
 - `runner-tray.cmd`：双击启动入口
-- `install.ps1`：部署脚本，将上述文件复制到目标 runner 目录
 - `tests/`：Pester 测试（配合 GitHub Actions CI）
 - `README.md`：使用说明
 
 ## 部署
 
-```powershell
-# 将本仓库克隆/下载到任意位置后，把工具部署到 runner 目录：
-.\install.ps1                          # 默认安装到 C:\actions-runner
-.\install.ps1 -RunnerDir D:\my-runner  # 指定目录
-```
-
-`install.ps1` 会备份已存在的同名文件为 `<file>.bak`；若目标目录缺少 `bin\Runner.Listener.exe` 会给出警告。也可以手动把 `runner-tray.ps1`、`runner-tray.cmd` 复制到 runner 目录（与 `run.cmd` 同级）即可使用。
+把 `runner-tray.ps1`、`runner-tray.cmd` 复制到 runner 目录（与 `run.cmd` 同级）即可使用，无需安装脚本。支持任意 runner 目录（不限于 `C:\actions-runner`）。
 
 ## 功能
 
