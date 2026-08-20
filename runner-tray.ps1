@@ -1041,6 +1041,12 @@ function Start-TrayApplication {
 
         $notifyIcon.Add_DoubleClick({
             try {
+                $path = Get-LatestRunnerDiagLogPath
+                if ($path) {
+                    Open-LogFile -Path $path
+                    return
+                }
+
                 $message = "GitHub Runner is currently $(Get-RunnerState)."
                 [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
             } catch {
