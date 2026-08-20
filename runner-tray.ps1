@@ -280,7 +280,14 @@ function Get-AutostartCommand {
 function Test-AutostartEnabled {
     try {
         $currentValue = (Get-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -ErrorAction Stop).$AutostartValueName
-        return [string]::IsNullOrWhiteSpace($currentValue) -eq $false
+        if ([string]::IsNullOrWhiteSpace($currentValue)) {
+            return $false
+        }
+
+        # Only report enabled when the stored command still points at this
+        # exact script; a stale entry (directory moved, old value name) is not
+        # actually functional even though the value exists.
+        return ($currentValue.Trim() -ieq (Get-AutostartCommand))
     } catch {
         return $false
     }
