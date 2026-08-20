@@ -67,5 +67,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\runner-tray.ps1
 
 ## 注意事项
 
-- **Stop runner** 会结束当前 runner 进程；如果正有任务执行，会一并停止该任务
+- **Stop runner** 会结束当前 runner 进程；如果正有任务执行，会一并停止该任务（托盘菜单已加确认，命令行 `-StopRunner` 不确认）
 - **Exit tray icon** 只关闭托盘界面，不会停止已运行的 runner
+
+## 安全说明
+
+- `runner-tray.cmd` 与自启动项使用 `-ExecutionPolicy Bypass` 启动脚本，这是本地工具常用的便捷方式；对安全性有更高要求时，建议对 `runner-tray.ps1` 进行代码签名（`Set-AuthenticodeSignature`）后改用受限策略（如 `RemoteSigned`）
+- 本工具按当前用户运行。若 runner 以其他账号（如服务账号）运行，普通权限下无法读取其进程路径，托盘会显示 **Unknown** 状态——此时需以管理员身份运行本工具才能看到真实状态
+- 状态判断逻辑基于当前目录下的 `Runner.Listener.exe` / `Runner.Worker.exe` 进程，无法区分其他账号同名进程时按 Unknown 处理，不会误操作
