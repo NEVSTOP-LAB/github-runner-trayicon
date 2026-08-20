@@ -856,7 +856,7 @@ function Start-TrayApplication {
         [void]$contextMenu.Items.Add('-')
         $exitItem = $contextMenu.Items.Add('Exit tray icon')
 
-        $script:CurrentIcon = $null
+        $script:IconCache = @{}
 
         $refreshUi = {
             try {
@@ -873,12 +873,10 @@ function Start-TrayApplication {
                 $autostartItem.Checked = Test-AutostartEnabled
                 $notifyIcon.Text = "GitHub Runner: $state"
 
-                if ($script:CurrentIcon) {
-                    $script:CurrentIcon.Dispose()
+                if (-not $script:IconCache.ContainsKey($state)) {
+                    $script:IconCache[$state] = New-StatusIcon -State $state
                 }
-
-                $script:CurrentIcon = New-StatusIcon -State $state
-                $notifyIcon.Icon = $script:CurrentIcon
+                $notifyIcon.Icon = $script:IconCache[$state]
             } catch {
                 Show-TrayError -ErrorRecord $_
             }
@@ -1022,8 +1020,10 @@ function Start-TrayApplication {
         $timer.Start()
         [System.Windows.Forms.Application]::Run()
 
-        if ($script:CurrentIcon) {
-            $script:CurrentIcon.Dispose()
+        if ($script:IconCache) {
+            foreach ($cacheIcon in $script:IconCache.Values) {
+                $cacheIcon.Dispose()
+            }
         }
 
         $timer.Dispose()
