@@ -41,6 +41,7 @@ try {
 $PathHash = ([System.BitConverter]::ToString($pathHashBytes)).Replace('-', '')
 $TrayAppMutexName = "Global\GitHubRunnerTrayApp_$PathHash"
 $RunnerHostMutexName = "Global\GitHubRunnerHost_$PathHash"
+$script:UnresolvedRunnerProcesses = @()
 
 function Ensure-StateDirectory {
     if (-not (Test-Path -LiteralPath $StateRoot)) {
@@ -116,12 +117,14 @@ function Get-LastHostLogLine {
 }
 
 function Get-RunnerProcesses {
-    $all = Get-Process -Name 'Runner.Listener', 'Runner.Worker' -ErrorAction SilentlyContinue
-    if (-not $all) {
+    $all = @(Get-Process -Name 'Runner.Listener', 'Runner.Worker' -ErrorAction SilentlyContinue)
+    if ($all.Count -eq 0) {
+        $script:UnresolvedRunnerProcesses = @()
         return @()
     }
 
     $matched = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
+    $unresolved = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
     foreach ($process in $all) {
         $expectedPath = $null
         if ($process.ProcessName -eq 'Runner.Listener') {
@@ -134,15 +137,38 @@ function Get-RunnerProcesses {
             continue
         }
 
+        $exePath = $null
         try {
-            if ($process.Path -eq $expectedPath) {
-                [void]$matched.Add($process)
-            }
+            $exePath = $process.Path
         } catch {
-            # Keep filtering strict to this runner directory if the path is not readable.
+            $exePath = $null
+        }
+
+        if (-not $exePath) {
+            # Process.Path is not readable (e.g. the process runs under another
+            # account). Try CIM as a fallback; it can still return $null without
+            # elevation.
+            try {
+                $cimProcess = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $process.Id) -ErrorAction Stop
+                $exePath = $cimProcess.ExecutablePath
+            } catch {
+                $exePath = $null
+            }
+        }
+
+        if ($exePath -and ($exePath -ieq $expectedPath)) {
+            [void]$matched.Add($process)
+            continue
+        }
+
+        if (-not $exePath) {
+            # Same-named process whose directory we cannot verify; report it so
+            # the state can surface as 'Unknown' instead of a false 'Stopped'.
+            [void]$unresolved.Add($process)
         }
     }
 
+    $script:UnresolvedRunnerProcesses = $unresolved.ToArray()
     return $matched.ToArray()
 }
 
@@ -154,6 +180,10 @@ function Get-RunnerState {
 
     if ($processes | Where-Object { $_.ProcessName -eq 'Runner.Listener' }) {
         return 'Idle'
+    }
+
+    if (@($script:UnresolvedRunnerProcesses).Count -gt 0) {
+        return 'Unknown'
     }
 
     return 'Stopped'
@@ -253,6 +283,10 @@ function Wait-ForState {
 
 function Start-RunnerControl {
     $state = Get-RunnerState
+    if ($state -eq 'Unknown') {
+        return 'Runner state is unknown: a Runner.Listener/Runner.Worker process exists whose directory cannot be verified (it likely runs under another account). Run the tray elevated or stop that runner before starting this one.'
+    }
+
     if ($state -ne 'Stopped') {
         return "Runner is already $state."
     }
@@ -303,6 +337,10 @@ function Stop-RunnerProcesses {
 }
 
 function Stop-RunnerControl {
+    if ((Get-RunnerState) -eq 'Unknown') {
+        return 'Runner state is unknown: a same-named runner process exists whose directory cannot be verified. Stop aborted to avoid killing a runner outside this directory.'
+    }
+
     Write-StopSignal
 
     $hostPid = Get-RunnerHostPid
@@ -623,7 +661,7 @@ public static class TrayNativeMethods
 function New-StatusIcon {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Stopped', 'Idle', 'Busy')]
+        [ValidateSet('Stopped', 'Idle', 'Busy', 'Unknown')]
         [string]$State
     )
 
@@ -652,6 +690,9 @@ function New-StatusIcon {
             }
             'Busy' {
                 $markerColor = [System.Drawing.Color]::FromArgb(255, 153, 0)
+            }
+            'Unknown' {
+                $markerColor = [System.Drawing.Color]::FromArgb(120, 120, 120)
             }
             default {
                 $markerColor = [System.Drawing.Color]::FromArgb(201, 48, 44)
@@ -727,9 +768,15 @@ function Start-TrayApplication {
 
         $refreshUi = {
             $state = Get-RunnerState
-            $statusItem.Text = "Status: $state"
-            $startItem.Enabled = $state -eq 'Stopped'
-            $stopItem.Enabled = $state -ne 'Stopped'
+            if ($state -eq 'Unknown') {
+                $statusItem.Text = 'Status: Unknown (elevation required)'
+                $startItem.Enabled = $false
+                $stopItem.Enabled = $false
+            } else {
+                $statusItem.Text = "Status: $state"
+                $startItem.Enabled = $state -eq 'Stopped'
+                $stopItem.Enabled = $state -in @('Idle', 'Busy')
+            }
             $autostartItem.Checked = Test-AutostartEnabled
             $notifyIcon.Text = "GitHub Runner: $state"
 

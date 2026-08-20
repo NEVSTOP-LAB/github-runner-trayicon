@@ -16,6 +16,7 @@
    - 红色斜线：已停止
    - 绿色圆点：Idle（仅 `Runner.Listener.exe` 存在）
    - 橙色圆环：Busy（检测到 `Runner.Worker.exe`）
+   - 灰色圆点：Unknown（存在同名 runner 进程但无法验证目录，通常该进程以其他账号运行，需要以管理员身份运行本工具）
 4. 支持查看 **run.cmd 实时输出**（不修改 [run.cmd](C:/actions-runner/run.cmd) 本体）
 5. 托盘程序和 runner 宿主都限制为单实例运行
 
