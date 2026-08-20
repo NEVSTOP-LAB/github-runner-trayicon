@@ -31,8 +31,14 @@ $UpdateFinishedFile = Join-Path $ScriptRoot 'update.finished'
 $ReadmePath = Join-Path $ScriptRoot 'README.md'
 $AutostartRegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 # Prefer Windows PowerShell (guaranteed on Windows, supports -Sta); fall back
-# to pwsh when the host only ships PowerShell 7.
-$WindowsPowerShellExe = Join-Path $PSHOME 'powershell.exe'
+# to pwsh when Windows PowerShell is not installed. Use the canonical install
+# path instead of $PSHOME so the preference also works when this script runs
+# under PowerShell 7 ($PSHOME would point at the pwsh directory).
+if ($env:WINDIR) {
+    $WindowsPowerShellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+} else {
+    $WindowsPowerShellExe = Join-Path $PSHOME 'powershell.exe'
+}
 if (Test-Path -LiteralPath $WindowsPowerShellExe) {
     $PowerShellExe = $WindowsPowerShellExe
 } else {
