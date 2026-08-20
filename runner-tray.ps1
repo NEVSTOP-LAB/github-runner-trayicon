@@ -223,6 +223,26 @@ function Get-RunnerHostPid {
         return $null
     }
 
+    # The PID file must point at our PowerShell host process, not at some
+    # unrelated process that happened to reuse the PID.
+    if ($process.ProcessName -notin @('powershell', 'pwsh')) {
+        Remove-IfExists -Path $HostPidFile
+        Write-HostLog -Message ("Stale host PID file: PID {0} belongs to {1}, not a PowerShell host process." -f $pidValue, $process.ProcessName)
+        return $null
+    }
+
+    # Best-effort command-line check; skip when it is not readable (elevation).
+    try {
+        $cimProcess = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $pidValue) -ErrorAction Stop
+        if ($cimProcess -and $cimProcess.CommandLine -and ($cimProcess.CommandLine -notmatch '-RunnerHost')) {
+            Remove-IfExists -Path $HostPidFile
+            Write-HostLog -Message ("Stale host PID file: PID {0} command line does not reference -RunnerHost." -f $pidValue)
+            return $null
+        }
+    } catch {
+        # Cannot verify the command line; accept the PID as-is.
+    }
+
     return $pidValue
 }
 
