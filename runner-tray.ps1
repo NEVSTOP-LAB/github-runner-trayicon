@@ -1144,17 +1144,32 @@ try {
         $icons = @(
             (New-StatusIcon -State 'Stopped'),
             (New-StatusIcon -State 'Idle'),
-            (New-StatusIcon -State 'Busy')
+            (New-StatusIcon -State 'Busy'),
+            (New-StatusIcon -State 'Unknown')
         )
         foreach ($icon in $icons) {
             $icon.Dispose()
         }
 
+        # Probe whether the state directory is writable.
+        $stateDirWritable = $false
+        try {
+            $probeFile = Join-Path $StateRoot '.selftest-probe'
+            Set-Content -LiteralPath $probeFile -Value 'probe'
+            Remove-IfExists -Path $probeFile
+            $stateDirWritable = $true
+        } catch {
+        }
+
         [pscustomobject]@{
             ScriptPath = $ScriptPath
+            RunCmdExists = Test-Path -LiteralPath $RunCmdPath
+            BinDirExists = Test-Path -LiteralPath $BinRoot
             RunnerState = Get-RunnerState
             AutostartEnabled = Test-AutostartEnabled
             AutostartCommand = Get-AutostartCommand
+            AutostartRegValueName = $AutostartValueName
+            StateDirWritable = $stateDirWritable
             LatestRunnerLogPath = Get-LatestRunnerDiagLogPath
             RunCmdLiveLogPath = Get-RunCmdLiveLogPath
             StateRoot = $StateRoot
