@@ -357,7 +357,11 @@ function Invoke-RunnerHost {
             }
 
             Add-Content -Path $RunCmdLiveLogFile -Value ("[{0}] Starting run.cmd" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
-            $runCmdProcess = Start-Process -FilePath $RunCmdPath -WindowStyle Hidden -WorkingDirectory $ScriptRoot -RedirectStandardOutput $RunCmdLiveLogFile -PassThru
+            # Launch via cmd.exe so run.cmd output is APPENDED to the live log
+            # (Start-Process -RedirectStandardOutput truncates the file) and so
+            # stderr is merged into the same live log (2>&1).
+            $redirectCommand = '""{0}" >> "{1}" 2>&1"' -f $RunCmdPath, $RunCmdLiveLogFile
+            $runCmdProcess = Start-Process -FilePath $env:ComSpec -ArgumentList '/c', $redirectCommand -WindowStyle Hidden -WorkingDirectory $ScriptRoot -PassThru
             Write-HostLog -Message ("run.cmd started with PID {0}." -f $runCmdProcess.Id)
 
             while (-not $runCmdProcess.HasExited) {
