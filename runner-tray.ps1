@@ -756,8 +756,17 @@ public static class TrayNativeMethods
 {
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     public static extern bool DestroyIcon(IntPtr handle);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
 }
 '@
+
+    # Keep the tray icon and forms crisp on high-DPI displays.
+    try {
+        [void][TrayNativeMethods]::SetProcessDPIAware()
+    } catch {
+    }
 }
 
 function New-StatusIcon {
