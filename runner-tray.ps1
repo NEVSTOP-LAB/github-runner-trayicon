@@ -679,6 +679,23 @@ function Show-LogViewerWindow {
     [void]$form.ShowDialog()
 }
 
+function Show-TrayError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    try {
+        Write-HostLog -Message ("Tray error: {0}" -f $ErrorRecord.Exception.ToString())
+    } catch {
+    }
+
+    try {
+        [System.Windows.Forms.MessageBox]::Show("An error occurred:`r`n$($ErrorRecord.Exception.Message)", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+    } catch {
+    }
+}
+
 function Ensure-StaForTray {
     if ([System.Threading.Thread]::CurrentThread.ApartmentState -eq [System.Threading.ApartmentState]::STA) {
         return $true
@@ -796,6 +813,26 @@ function Start-TrayApplication {
         [System.Windows.Forms.Application]::EnableVisualStyles()
         [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
+        # Global exception safety nets so a UI-thread failure is logged (and
+        # visible) instead of silently killing the tray.
+        $script:TrayThreadExceptionHandler = [System.Threading.ThreadExceptionEventHandler]{
+            param($sender, $args)
+            try {
+                Write-HostLog -Message ("Tray thread exception: {0}" -f $args.Exception.ToString())
+            } catch {
+            }
+        }
+        [System.Windows.Forms.Application]::Add_ThreadException($script:TrayThreadExceptionHandler)
+
+        $script:TrayUnhandledExceptionHandler = [System.UnhandledExceptionEventHandler]{
+            param($sender, $args)
+            try {
+                Write-HostLog -Message ("Tray unhandled exception: {0}" -f $args.ExceptionObject.ToString())
+            } catch {
+            }
+        }
+        [System.AppDomain]::CurrentDomain.Add_UnhandledException($script:TrayUnhandledExceptionHandler)
+
         $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
         $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
         $statusItem = $contextMenu.Items.Add('Status: Loading...')
@@ -822,25 +859,29 @@ function Start-TrayApplication {
         $script:CurrentIcon = $null
 
         $refreshUi = {
-            $state = Get-RunnerState
-            if ($state -eq 'Unknown') {
-                $statusItem.Text = 'Status: Unknown (elevation required)'
-                $startItem.Enabled = $false
-                $stopItem.Enabled = $false
-            } else {
-                $statusItem.Text = "Status: $state"
-                $startItem.Enabled = $state -eq 'Stopped'
-                $stopItem.Enabled = $state -in @('Idle', 'Busy')
-            }
-            $autostartItem.Checked = Test-AutostartEnabled
-            $notifyIcon.Text = "GitHub Runner: $state"
+            try {
+                $state = Get-RunnerState
+                if ($state -eq 'Unknown') {
+                    $statusItem.Text = 'Status: Unknown (elevation required)'
+                    $startItem.Enabled = $false
+                    $stopItem.Enabled = $false
+                } else {
+                    $statusItem.Text = "Status: $state"
+                    $startItem.Enabled = $state -eq 'Stopped'
+                    $stopItem.Enabled = $state -in @('Idle', 'Busy')
+                }
+                $autostartItem.Checked = Test-AutostartEnabled
+                $notifyIcon.Text = "GitHub Runner: $state"
 
-            if ($script:CurrentIcon) {
-                $script:CurrentIcon.Dispose()
-            }
+                if ($script:CurrentIcon) {
+                    $script:CurrentIcon.Dispose()
+                }
 
-            $script:CurrentIcon = New-StatusIcon -State $state
-            $notifyIcon.Icon = $script:CurrentIcon
+                $script:CurrentIcon = New-StatusIcon -State $state
+                $notifyIcon.Icon = $script:CurrentIcon
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         }
 
         $notifyIcon.ContextMenuStrip = $contextMenu
@@ -851,82 +892,130 @@ function Start-TrayApplication {
         $timer.Add_Tick($refreshUi)
 
         $startItem.Add_Click({
-            $message = Start-RunnerControl
-            [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-            & $refreshUi
+            try {
+                $message = Start-RunnerControl
+                [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                & $refreshUi
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $stopItem.Add_Click({
-            $message = Stop-RunnerControl
-            [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-            & $refreshUi
+            try {
+                $message = Stop-RunnerControl
+                [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                & $refreshUi
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $autostartItem.Add_Click({
-            Set-AutostartEnabled -Enabled $autostartItem.Checked
-            & $refreshUi
+            try {
+                Set-AutostartEnabled -Enabled $autostartItem.Checked
+                & $refreshUi
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openLatestRunnerLogItem.Add_Click({
-            $path = Get-LatestRunnerDiagLogPath
-            if ($path) {
-                Open-LogFile -Path $path
-                return
-            }
+            try {
+                $path = Get-LatestRunnerDiagLogPath
+                if ($path) {
+                    Open-LogFile -Path $path
+                    return
+                }
 
-            [System.Windows.Forms.MessageBox]::Show("No runner log file found in:`r`n$DiagRoot", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("No runner log file found in:`r`n$DiagRoot", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $viewLatestRunnerLogItem.Add_Click({
-            Show-LogViewerWindow -PathResolver { Get-LatestRunnerDiagLogPath } -Title 'GitHub Runner - Live Log'
+            try {
+                Show-LogViewerWindow -PathResolver { Get-LatestRunnerDiagLogPath } -Title 'GitHub Runner - Live Log'
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $viewRunCmdLiveLogItem.Add_Click({
-            Ensure-StateDirectory
-            Show-LogViewerWindow -PathResolver { Get-RunCmdLiveLogPath } -Title 'GitHub Runner - run.cmd Live Output'
+            try {
+                Ensure-StateDirectory
+                Show-LogViewerWindow -PathResolver { Get-RunCmdLiveLogPath } -Title 'GitHub Runner - run.cmd Live Output'
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openRunCmdLiveLogItem.Add_Click({
-            Ensure-StateDirectory
-            if (Test-Path -LiteralPath $RunCmdLiveLogFile) {
-                Open-LogFile -Path $RunCmdLiveLogFile
-                return
-            }
+            try {
+                Ensure-StateDirectory
+                if (Test-Path -LiteralPath $RunCmdLiveLogFile) {
+                    Open-LogFile -Path $RunCmdLiveLogFile
+                    return
+                }
 
-            [System.Windows.Forms.MessageBox]::Show("run.cmd output log is not available yet:`r`n$RunCmdLiveLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("run.cmd output log is not available yet:`r`n$RunCmdLiveLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openHostLogItem.Add_Click({
-            Ensure-StateDirectory
-            if (Test-Path -LiteralPath $HostLogFile) {
-                Open-LogFile -Path $HostLogFile
-                return
-            }
+            try {
+                Ensure-StateDirectory
+                if (Test-Path -LiteralPath $HostLogFile) {
+                    Open-LogFile -Path $HostLogFile
+                    return
+                }
 
-            [System.Windows.Forms.MessageBox]::Show("Tray host log is not available yet:`r`n$HostLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                [System.Windows.Forms.MessageBox]::Show("Tray host log is not available yet:`r`n$HostLogFile", 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $openDocItem.Add_Click({
-            if (Test-Path -LiteralPath $ReadmePath) {
-                [void](Start-Process -FilePath $ReadmePath)
-            } else {
-                [System.Windows.Forms.MessageBox]::Show('README.md was not found.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            try {
+                if (Test-Path -LiteralPath $ReadmePath) {
+                    [void](Start-Process -FilePath $ReadmePath)
+                } else {
+                    [System.Windows.Forms.MessageBox]::Show('README.md was not found.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                }
+            } catch {
+                Show-TrayError -ErrorRecord $_
             }
         })
 
         $openFolderItem.Add_Click({
-            [void](Start-Process -FilePath $ScriptRoot)
+            try {
+                [void](Start-Process -FilePath $ScriptRoot)
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $exitItem.Add_Click({
-            $timer.Stop()
-            $notifyIcon.Visible = $false
-            [System.Windows.Forms.Application]::Exit()
+            try {
+                $timer.Stop()
+                $notifyIcon.Visible = $false
+                [System.Windows.Forms.Application]::Exit()
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         $notifyIcon.Add_DoubleClick({
-            $message = "GitHub Runner is currently $(Get-RunnerState)."
-            [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            try {
+                $message = "GitHub Runner is currently $(Get-RunnerState)."
+                [System.Windows.Forms.MessageBox]::Show($message, 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            } catch {
+                Show-TrayError -ErrorRecord $_
+            }
         })
 
         & $refreshUi
