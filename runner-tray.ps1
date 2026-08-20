@@ -800,6 +800,8 @@ function Start-TrayApplication {
         $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
         $statusItem = $contextMenu.Items.Add('Status: Loading...')
         $statusItem.Enabled = $false
+        $dirItem = $contextMenu.Items.Add("Runner directory: $ScriptRoot")
+        $dirItem.Enabled = $false
         [void]$contextMenu.Items.Add('-')
         $startItem = $contextMenu.Items.Add('Start runner')
         $stopItem = $contextMenu.Items.Add('Stop runner')
