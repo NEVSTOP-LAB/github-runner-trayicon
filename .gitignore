@@ -1,0 +1,9 @@
+# Ignore everything by default
+/*
+
+# Keep only files created for the tray tool
+!/.gitignore
+!/runner-tray.ps1
+!/runner-tray.cmd
+!/run.md
+!/readme.md
