@@ -479,6 +479,10 @@ function Get-LatestRunnerDiagLogPath {
 }
 
 function Get-RunCmdLiveLogPath {
+    if (-not (Test-Path -LiteralPath $RunCmdLiveLogFile)) {
+        return $null
+    }
+
     return $RunCmdLiveLogFile
 }
 
