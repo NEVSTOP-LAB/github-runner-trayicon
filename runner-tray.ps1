@@ -30,7 +30,19 @@ $RunCmdLiveLogFile = Join-Path $StateRoot 'run-cmd-live.log'
 $UpdateFinishedFile = Join-Path $ScriptRoot 'update.finished'
 $ReadmePath = Join-Path $ScriptRoot 'README.md'
 $AutostartRegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$PowerShellExe = Join-Path $PSHOME 'powershell.exe'
+# Prefer Windows PowerShell (guaranteed on Windows, supports -Sta); fall back
+# to pwsh when the host only ships PowerShell 7.
+$WindowsPowerShellExe = Join-Path $PSHOME 'powershell.exe'
+if (Test-Path -LiteralPath $WindowsPowerShellExe) {
+    $PowerShellExe = $WindowsPowerShellExe
+} else {
+    $pwshCommand = Get-Command 'pwsh' -ErrorAction SilentlyContinue
+    if ($pwshCommand) {
+        $PowerShellExe = $pwshCommand.Source
+    } else {
+        $PowerShellExe = $WindowsPowerShellExe
+    }
+}
 $sha1 = [System.Security.Cryptography.SHA1]::Create()
 try {
     $pathHashBytes = $sha1.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($ScriptRoot.ToLowerInvariant()))
