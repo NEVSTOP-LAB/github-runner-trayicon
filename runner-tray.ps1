@@ -91,6 +91,29 @@ function Exit-SingleInstance {
     $Mutex.Dispose()
 }
 
+function Test-LogRollover {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [int]$MaxBytes = 5242880
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($item.Length -gt $MaxBytes) {
+            $rotatedPath = "$Path.1"
+            Remove-Item -LiteralPath $rotatedPath -Force -ErrorAction SilentlyContinue
+            Rename-Item -LiteralPath $Path -NewName (Split-Path -Leaf $rotatedPath) -ErrorAction Stop
+        }
+    } catch {
+        # Rotation is best-effort; never break logging over it.
+    }
+}
+
 function Write-HostLog {
     param(
         [Parameter(Mandatory = $true)]
@@ -98,6 +121,7 @@ function Write-HostLog {
     )
 
     Ensure-StateDirectory
+    Test-LogRollover -Path $HostLogFile
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     Add-Content -Path $HostLogFile -Value "$timestamp $Message"
 }
@@ -438,6 +462,7 @@ function Invoke-RunnerHost {
                 break
             }
 
+            Test-LogRollover -Path $RunCmdLiveLogFile
             Add-Content -Path $RunCmdLiveLogFile -Value ("[{0}] Starting run.cmd" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
             # Launch via cmd.exe so run.cmd output is APPENDED to the live log
             # (Start-Process -RedirectStandardOutput truncates the file) and so
