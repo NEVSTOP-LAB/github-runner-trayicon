@@ -28,7 +28,7 @@ $StopFlagFile = Join-Path $StateRoot 'runner-host.stop'
 $HostLogFile = Join-Path $StateRoot 'runner-host.log'
 $RunCmdLiveLogFile = Join-Path $StateRoot 'run-cmd-live.log'
 $UpdateFinishedFile = Join-Path $ScriptRoot 'update.finished'
-$RunMdPath = Join-Path $ScriptRoot 'run.md'
+$ReadmePath = Join-Path $ScriptRoot 'README.md'
 $AutostartRegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $AutostartValueName = 'GitHubRunnerTrayIcon'
 $PowerShellExe = Join-Path $PSHOME 'powershell.exe'
@@ -714,7 +714,7 @@ function Start-TrayApplication {
         $openRunCmdLiveLogItem = $contextMenu.Items.Add('Open run.cmd output file')
         $openHostLogItem = $contextMenu.Items.Add('Open tray host log')
         [void]$contextMenu.Items.Add('-')
-        $openDocItem = $contextMenu.Items.Add('Open run.md')
+        $openDocItem = $contextMenu.Items.Add('Open README.md')
         $openFolderItem = $contextMenu.Items.Add('Open runner folder')
         [void]$contextMenu.Items.Add('-')
         $exitItem = $contextMenu.Items.Add('Exit tray icon')
@@ -801,10 +801,10 @@ function Start-TrayApplication {
         })
 
         $openDocItem.Add_Click({
-            if (Test-Path -LiteralPath $RunMdPath) {
-                [void](Start-Process -FilePath $RunMdPath)
+            if (Test-Path -LiteralPath $ReadmePath) {
+                [void](Start-Process -FilePath $ReadmePath)
             } else {
-                [System.Windows.Forms.MessageBox]::Show('run.md was not found.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                [System.Windows.Forms.MessageBox]::Show('README.md was not found.', 'GitHub Runner', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
             }
         })
 

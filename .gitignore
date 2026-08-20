@@ -5,5 +5,4 @@
 !/.gitignore
 !/runner-tray.ps1
 !/runner-tray.cmd
-!/run.md
-!/readme.md
+!/README.md
