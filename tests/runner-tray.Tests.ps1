@@ -27,7 +27,43 @@ Describe 'Autostart command' {
         Invoke-Expression $content
 
         $cmd = Get-AutostartCommand
-        $cmd | Should -Match '^"[^"]+" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Sta -File ".+"$'
+        $cmd | Should -Match '^"[^"]+" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Sta -File ".+" -StartRunnerOnLaunch$'
+    }
+}
+
+Describe 'Silent runner startup' {
+    It 'starts the runner and records the result in the host log' {
+        $dir = Get-Location
+        while ($null -ne $dir -and -not (Test-Path -LiteralPath (Join-Path $dir 'runner-tray.ps1'))) {
+            $dir = Split-Path -Parent $dir
+        }
+        if ($null -eq $dir) { throw 'runner-tray.ps1 not found above the current directory.' }
+        $scriptPath = Join-Path $dir 'runner-tray.ps1'
+        $content = Get-Content -LiteralPath $scriptPath -Raw
+        $content = $content -replace '(?ms)^\[CmdletBinding\(\)\]\s*param\([^)]*\)\s*', ''
+        $cut = $content.IndexOf('if ($RunnerHost) {')
+        if ($cut -lt 0) { throw 'dispatch marker not found in runner-tray.ps1' }
+        $content = $content.Substring(0, $cut).TrimEnd()
+        if ($content.EndsWith('try {')) { $content = $content.Substring(0, $content.Length - 5).TrimEnd() }
+        $escapedPath = $scriptPath.Replace("'", "''")
+        $content = $content.Replace('$ScriptPath = $PSCommandPath', "`$ScriptPath = '$escapedPath'")
+        Invoke-Expression $content
+
+        $script:Started = $false
+        $script:LoggedMessage = $null
+        function Start-RunnerControl {
+            $script:Started = $true
+            return 'Runner started.'
+        }
+        function Write-HostLog {
+            param([string]$Message)
+            $script:LoggedMessage = $Message
+        }
+
+        Start-RunnerSilently
+
+        $script:Started | Should -BeTrue
+        $script:LoggedMessage | Should -BeExactly 'Windows startup: Runner started.'
     }
 }
 
@@ -156,6 +192,38 @@ Describe 'Autostart registry' {
             $current = Get-ItemProperty -Path $testKey -Name $AutostartValueName -ErrorAction SilentlyContinue
             $null -eq $legacy | Should -BeTrue
             $null -ne $current | Should -BeTrue
+        } finally {
+            Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'migrates the old tray-only command and requests runner startup' {
+        $dir = Get-Location
+        while ($null -ne $dir -and -not (Test-Path -LiteralPath (Join-Path $dir 'runner-tray.ps1'))) {
+            $dir = Split-Path -Parent $dir
+        }
+        if ($null -eq $dir) { throw 'runner-tray.ps1 not found above the current directory.' }
+        $scriptPath = Join-Path $dir 'runner-tray.ps1'
+        $content = Get-Content -LiteralPath $scriptPath -Raw
+        $content = $content -replace '(?ms)^\[CmdletBinding\(\)\]\s*param\([^)]*\)\s*', ''
+        $cut = $content.IndexOf('if ($RunnerHost) {')
+        if ($cut -lt 0) { throw 'dispatch marker not found in runner-tray.ps1' }
+        $content = $content.Substring(0, $cut).TrimEnd()
+        if ($content.EndsWith('try {')) { $content = $content.Substring(0, $content.Length - 5).TrimEnd() }
+        $escapedPath = $scriptPath.Replace("'", "''")
+        $content = $content.Replace('$ScriptPath = $PSCommandPath', "`$ScriptPath = '$escapedPath'")
+        Invoke-Expression $content
+
+        $testKey = Join-Path 'HKCU:\Software' 'NEVSTOP-LAB-PesterTest'
+        $AutostartRegPath = $testKey
+        try {
+            Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -Path $testKey -Force | Out-Null
+            New-ItemProperty -Path $testKey -Name $AutostartValueName -PropertyType String -Value (Get-LegacyAutostartCommand) -Force | Out-Null
+
+            Repair-LegacyAutostartCommand | Should -BeTrue
+            $stored = (Get-ItemProperty -Path $testKey -Name $AutostartValueName -ErrorAction Stop).$AutostartValueName
+            $stored | Should -BeExactly (Get-AutostartCommand)
         } finally {
             Remove-Item -Path $testKey -Recurse -Force -ErrorAction SilentlyContinue
         }
