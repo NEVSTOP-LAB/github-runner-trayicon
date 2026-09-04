@@ -347,8 +347,14 @@ function Set-AutostartEnabled {
     }
 
     Remove-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -ErrorAction SilentlyContinue
-    # Clean up the fixed name used before per-directory hashing existed.
-    Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
+    try {
+        $legacyValue = (Get-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction Stop).$LegacyAutostartValueName
+        if ($legacyValue -and ($legacyValue.Trim() -iin @((Get-AutostartCommand), (Get-LegacyAutostartCommand)))) {
+            Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # No legacy value exists for this runner directory.
+    }
 }
 
 function Repair-LegacyAutostartCommand {

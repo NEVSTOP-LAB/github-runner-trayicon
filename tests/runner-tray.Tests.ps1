@@ -197,7 +197,7 @@ Describe 'Autostart registry' {
         }
     }
 
-    It 'preserves a shared legacy value owned by another runner directory' {
+    It 'preserves another runner directory shared legacy value when enabling and disabling' {
         $dir = Get-Location
         while ($null -ne $dir -and -not (Test-Path -LiteralPath (Join-Path $dir 'runner-tray.ps1'))) {
             $dir = Split-Path -Parent $dir
@@ -223,6 +223,11 @@ Describe 'Autostart registry' {
             New-ItemProperty -Path $testKey -Name $LegacyAutostartValueName -PropertyType String -Value $otherRunnerCommand -Force | Out-Null
 
             Set-AutostartEnabled -Enabled $true
+
+            $legacy = (Get-ItemProperty -Path $testKey -Name $LegacyAutostartValueName -ErrorAction Stop).$LegacyAutostartValueName
+            $legacy | Should -BeExactly $otherRunnerCommand
+
+            Set-AutostartEnabled -Enabled $false
 
             $legacy = (Get-ItemProperty -Path $testKey -Name $LegacyAutostartValueName -ErrorAction Stop).$LegacyAutostartValueName
             $legacy | Should -BeExactly $otherRunnerCommand
