@@ -16,7 +16,7 @@
 ## 功能
 
 1. 托盘菜单可启动 / 停止本机 GitHub Actions runner
-2. 可勾选 **Run on Windows startup** 设置当前用户开机自启动（注册表值按目录哈希命名，多 runner 目录互不覆盖）
+2. 可勾选 **Run on Windows startup** 设置当前用户登录后静默启动 runner 和托盘（不显示启动成功确认框；注册表值按目录哈希命名，多 runner 目录互不覆盖）
 3. 托盘图标按 runner 状态显示不同标记：
    - 红色斜线：已停止
    - 绿色圆点：Idle（仅 `Runner.Listener.exe` 存在）
@@ -71,7 +71,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -File .\runner-tray.ps1
 
 - runner 宿主状态文件保存在 `\.trayicon/`
 - 宿主日志文件为 `\.trayicon\runner-host.log`，run.cmd 输出缓存为 `\.trayicon\run-cmd-live.log`；两者超过 5 MB 自动滚动为 `<name>.1`
-- 自启动通过注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入，仅影响当前用户；值名为 `GitHubRunnerTrayIcon_<目录哈希>`，旧版固定名 `GitHubRunnerTrayIcon` 在关闭自启动时会被一并清理
+- 自启动通过注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 写入，仅影响当前用户；登录后会先静默启动 runner，再运行托盘；值名为 `GitHubRunnerTrayIcon_<目录哈希>`，旧版固定名 `GitHubRunnerTrayIcon` 仅在指向当前 runner 目录时才会被清理
 - 宿主进程优先使用 Windows PowerShell（`powershell.exe`）；仅安装 PowerShell 7 的环境自动回退到 `pwsh`
 - 托盘菜单显示 Unknown 状态且无法启动/停止时，请以管理员身份运行本工具
 

@@ -3,6 +3,7 @@ param(
     [switch]$RunnerHost,
     [switch]$Status,
     [switch]$StartRunner,
+    [switch]$StartRunnerOnLaunch,
     [switch]$StopRunner,
     [switch]$LogPath,
     [switch]$SelfTest
@@ -292,6 +293,10 @@ function Get-RunnerHostPid {
 }
 
 function Get-AutostartCommand {
+    return ('"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Sta -File "{1}" -StartRunnerOnLaunch' -f $PowerShellExe, $ScriptPath)
+}
+
+function Get-LegacyAutostartCommand {
     return ('"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Sta -File "{1}"' -f $PowerShellExe, $ScriptPath)
 }
 
@@ -328,16 +333,52 @@ function Set-AutostartEnabled {
     )
 
     if ($Enabled) {
-        # Remove the legacy fixed name first so an upgrade cannot leave both
-        # values in place and double-launch the tray at startup.
-        Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
         [void](New-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -PropertyType String -Value (Get-AutostartCommand) -Force)
+
+        try {
+            $legacyValue = (Get-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction Stop).$LegacyAutostartValueName
+            if ($legacyValue -and ($legacyValue.Trim() -iin @((Get-AutostartCommand), (Get-LegacyAutostartCommand)))) {
+                Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
+            }
+        } catch {
+            # No legacy value exists for this runner directory.
+        }
         return
     }
 
     Remove-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -ErrorAction SilentlyContinue
-    # Clean up the fixed name used before per-directory hashing existed.
-    Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
+    try {
+        $legacyValue = (Get-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction Stop).$LegacyAutostartValueName
+        if ($legacyValue -and ($legacyValue.Trim() -iin @((Get-AutostartCommand), (Get-LegacyAutostartCommand)))) {
+            Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # No legacy value exists for this runner directory.
+    }
+}
+
+function Repair-LegacyAutostartCommand {
+    $legacyCommand = Get-LegacyAutostartCommand
+    foreach ($valueName in @($AutostartValueName, $LegacyAutostartValueName)) {
+        try {
+            $currentValue = (Get-ItemProperty -Path $AutostartRegPath -Name $valueName -ErrorAction Stop).$valueName
+            if ($currentValue -and ($currentValue.Trim() -ieq $legacyCommand)) {
+                try {
+                    Set-AutostartEnabled -Enabled $true
+                } catch {
+                    try {
+                        Write-HostLog -Message "Windows startup: failed to migrate autostart command: $($_.Exception.Message)"
+                    } catch {
+                    }
+                }
+                return $true
+            }
+        } catch {
+            # Missing or unreadable values do not require migration.
+        }
+    }
+
+    return $false
 }
 
 function Write-StopSignal {
@@ -425,6 +466,20 @@ function Start-RunnerControl {
     }
 
     return "Runner start failed: no idle listener was detected within $IdleTimeoutSeconds seconds."
+}
+
+function Start-RunnerSilently {
+    try {
+        $message = Start-RunnerControl
+    } catch {
+        $message = "Runner start failed: $($_.Exception.Message)"
+    }
+
+    try {
+        Write-HostLog -Message "Windows startup: $message"
+    } catch {
+        # Windows startup must remain silent even when logging is unavailable.
+    }
 }
 
 function Stop-RunnerProcesses {
@@ -1188,6 +1243,10 @@ try {
             StateRoot = $StateRoot
         } | Format-List | Out-String | Write-Output
         exit 0
+    }
+
+    if ($StartRunnerOnLaunch -or (Repair-LegacyAutostartCommand)) {
+        Start-RunnerSilently
     }
 
     Start-TrayApplication
