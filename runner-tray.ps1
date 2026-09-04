@@ -333,10 +333,16 @@ function Set-AutostartEnabled {
     )
 
     if ($Enabled) {
-        # Remove the legacy fixed name first so an upgrade cannot leave both
-        # values in place and double-launch the tray at startup.
-        Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
         [void](New-ItemProperty -Path $AutostartRegPath -Name $AutostartValueName -PropertyType String -Value (Get-AutostartCommand) -Force)
+
+        try {
+            $legacyValue = (Get-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction Stop).$LegacyAutostartValueName
+            if ($legacyValue -and ($legacyValue.Trim() -iin @((Get-AutostartCommand), (Get-LegacyAutostartCommand)))) {
+                Remove-ItemProperty -Path $AutostartRegPath -Name $LegacyAutostartValueName -ErrorAction SilentlyContinue
+            }
+        } catch {
+            # No legacy value exists for this runner directory.
+        }
         return
     }
 
@@ -351,7 +357,14 @@ function Repair-LegacyAutostartCommand {
         try {
             $currentValue = (Get-ItemProperty -Path $AutostartRegPath -Name $valueName -ErrorAction Stop).$valueName
             if ($currentValue -and ($currentValue.Trim() -ieq $legacyCommand)) {
-                Set-AutostartEnabled -Enabled $true
+                try {
+                    Set-AutostartEnabled -Enabled $true
+                } catch {
+                    try {
+                        Write-HostLog -Message "Windows startup: failed to migrate autostart command: $($_.Exception.Message)"
+                    } catch {
+                    }
+                }
                 return $true
             }
         } catch {
